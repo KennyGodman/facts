@@ -2,6 +2,11 @@
 
 **A Decentralized Multi-Source Fact Verification and Consensus Primitive for GenLayer**
 
+> **Live On-Chain Deployment:**
+> - **Contract Address:** [`0xAb96E7409107c57f72Aef182C78dF295c12e9ACE`](https://explorer-studio.genlayer.com/address/0xAb96E7409107c57f72Aef182C78dF295c12e9ACE)
+> - **Network:** GenLayer Studio Testnet (`studionet`)
+> - **GenLayer Explorer:** [explorer-studio.genlayer.com/address/0xAb96E7409107c57f72Aef182C78dF295c12e9ACE](https://explorer-studio.genlayer.com/address/0xAb96E7409107c57f72Aef182C78dF295c12e9ACE)
+
 ---
 
 ## 1. Problem Statement & Motivation
@@ -109,8 +114,8 @@ question_id = oracle.register_question(
 # 2. Trigger resolution after resolution_date
 oracle.resolve_question(question_id)
 
-# 3. Read structured result
-data = oracle.get_resolution(question_id)
+# 3. Read structured result (JSON)
+data = json.loads(oracle.get_resolution(question_id))
 if data["resolution"]["status"] == "resolved":
     payout_insurance(data["resolution"]["answer"])
 elif data["resolution"]["conflict_detected"]:

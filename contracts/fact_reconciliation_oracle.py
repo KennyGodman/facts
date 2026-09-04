@@ -1,46 +1,7 @@
-# { "Depends": "py-genlayer:testnet" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 import json
 import hashlib
-
-# Standard GenLayer environment imports with graceful fallback for direct unit testing
-try:
-    from genlayer import *
-except ImportError:
-    # Direct test-mode fallback shim if running in raw Python
-    class _WriteDecorator:
-        def __call__(self, f):
-            return f
-        @staticmethod
-        def payable(f):
-            return f
-
-    class _MockGl:
-        class public:
-            @staticmethod
-            def view(f):
-                return f
-            write = _WriteDecorator()
-
-        class message:
-            sender = "0x0000000000000000000000000000000000000001"
-            value = 1000000000000000
-        class Rollback(Exception):
-            pass
-        class Contract:
-            pass
-        class nondet:
-            class web:
-                @staticmethod
-                def get(url, headers=None):
-                    raise NotImplementedError("Direct mode test must mock gl.nondet.web.get")
-            @staticmethod
-            def exec_prompt(prompt):
-                raise NotImplementedError("Direct mode test must mock gl.nondet.exec_prompt")
-        class eq_principle:
-            @staticmethod
-            def prompt_non_comparative(func, task, criteria):
-                return func()
-    gl = _MockGl()
+from genlayer import *
 
 
 class FactReconciliationOracle(gl.Contract):
@@ -61,22 +22,21 @@ class FactReconciliationOracle(gl.Contract):
     # -------------------------------------------------------------------------
     # Persistent State
     # -------------------------------------------------------------------------
-    questions: dict[str, dict]
-    resolutions: dict[str, dict]
-    disputes: dict[str, dict]
-    min_fee: int
-    owner: str
+    questions: TreeMap[str, str]
+    resolutions: TreeMap[str, str]
+    disputes: TreeMap[str, str]
+    min_fee: u256
+    owner: Address
 
-    def __init__(self, min_fee: int = 1000000000000000):
+    def __init__(self):
         """
         Initializes the oracle contract with an anti-spam fee threshold.
-        :param min_fee: Minimum wei deposit required per registration/dispute.
         """
-        self.questions = {}
-        self.resolutions = {}
-        self.disputes = {}
-        self.min_fee = min_fee
-        self.owner = str(gl.message.sender)
+        self.min_fee = u256(1000000000000000)
+        self.owner = gl.message.sender_address
+        self.questions = TreeMap()
+        self.resolutions = TreeMap()
+        self.disputes = TreeMap()
 
     # -------------------------------------------------------------------------
     # Public Methods
@@ -99,30 +59,33 @@ class FactReconciliationOracle(gl.Contract):
         if not text or len(text.strip()) == 0:
             raise gl.Rollback("Question text cannot be empty")
 
-        if not source_urls or len(source_urls) < 1:
+        urls_list = list(source_urls)
+        if not urls_list or len(urls_list) < 1:
             raise gl.Rollback("At least one source URL is required (multiple recommended)")
 
         # Compute deterministic question ID
-        payload = f"{text}:{resolution_date}:{','.join(source_urls)}:{gl.message.sender}"
+        sender_str = str(gl.message.sender_address)
+        payload = f"{text}:{resolution_date}:{','.join(urls_list)}:{sender_str}"
         question_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
         if question_id in self.questions:
             raise gl.Rollback("Identical question is already registered")
 
-        self.questions[question_id] = {
+        q_record = {
             "question_id": question_id,
             "text": text.strip(),
             "resolution_date": resolution_date.strip(),
-            "source_urls": list(source_urls),
+            "source_urls": urls_list,
             "status": "pending",  # pending | resolved | unresolved | disputed
-            "creator": str(gl.message.sender),
+            "creator": sender_str,
             "fee_paid": int(gl.message.value)
         }
+        self.questions[question_id] = json.dumps(q_record)
 
         return question_id
 
     @gl.public.write
-    def resolve_question(self, question_id: str) -> None:
+    def resolve_question(self, question_id: str) -> str:
         """
         Executes multi-validator fact reconciliation on the registered question.
         
@@ -136,16 +99,17 @@ class FactReconciliationOracle(gl.Contract):
         if question_id not in self.questions:
             raise gl.Rollback(f"Question {question_id} does not exist")
 
-        current_status = self.questions[question_id]["status"]
+        q_data = json.loads(self.questions[question_id])
+        current_status = q_data.get("status", "pending")
         if current_status == "resolved":
             raise gl.Rollback("Question has already been successfully resolved")
 
         # ---------------------------------------------------------------------
         # 1. State Isolation: Copy persistent state into local variables
         # ---------------------------------------------------------------------
-        target_text = str(self.questions[question_id]["text"])
-        target_resolution_date = str(self.questions[question_id]["resolution_date"])
-        target_source_urls = list(self.questions[question_id]["source_urls"])
+        target_text = str(q_data["text"])
+        target_resolution_date = str(q_data["resolution_date"])
+        target_source_urls = list(q_data["source_urls"])
 
         # ---------------------------------------------------------------------
         # 2. Non-deterministic Execution Block (Each validator runs independently)
@@ -232,8 +196,7 @@ RECONCILIATION INSTRUCTIONS:
         """
 
         agreed_verdict_str = gl.eq_principle.prompt_non_comparative(
-            func=validator_fact_reconciliation,
-            task=task_description,
+            task=validator_fact_reconciliation,
             criteria=criteria_rules
         )
 
@@ -254,9 +217,10 @@ RECONCILIATION INSTRUCTIONS:
         # 4. State Updates
         # ---------------------------------------------------------------------
         final_status = verdict.get("status", "unresolved")
-        self.questions[question_id]["status"] = final_status
+        q_data["status"] = final_status
+        self.questions[question_id] = json.dumps(q_data)
 
-        self.resolutions[question_id] = {
+        resolution_record = {
             "question_id": question_id,
             "status": final_status,
             "answer": str(verdict.get("answer", "UNKNOWN")),
@@ -266,10 +230,16 @@ RECONCILIATION INSTRUCTIONS:
             "reasoning": str(verdict.get("reasoning", "")),
             "resolved_at": target_resolution_date
         }
+        self.resolutions[question_id] = json.dumps(resolution_record)
 
         # Update active dispute if one was being resolved
-        if question_id in self.disputes and self.disputes[question_id]["status"] == "open":
-            self.disputes[question_id]["status"] = "settled"
+        if question_id in self.disputes:
+            disp_data = json.loads(self.disputes[question_id])
+            if disp_data.get("status") == "open":
+                disp_data["status"] = "settled"
+                self.disputes[question_id] = json.dumps(disp_data)
+
+        return final_status
 
     @gl.public.write.payable
     def dispute_resolution(
@@ -277,7 +247,7 @@ RECONCILIATION INSTRUCTIONS:
         question_id: str,
         reason: str,
         additional_sources: list[str]
-    ) -> None:
+    ) -> str:
         """
         Challenges a prior resolution or unresolved state by submitting additional sources
         and paying the dispute deposit. Re-triggers resolution with the expanded source pool.
@@ -292,41 +262,42 @@ RECONCILIATION INSTRUCTIONS:
             raise gl.Rollback("A valid reason for dispute is required")
 
         # Record dispute record
-        self.disputes[question_id] = {
+        new_sources_list = list(additional_sources) if additional_sources else []
+        dispute_record = {
             "question_id": question_id,
-            "challenger": str(gl.message.sender),
+            "challenger": str(gl.message.sender_address),
             "reason": reason.strip(),
             "status": "open",
             "fee_paid": int(gl.message.value),
-            "new_sources": list(additional_sources) if additional_sources else []
+            "new_sources": new_sources_list
         }
+        self.disputes[question_id] = json.dumps(dispute_record)
 
         # Expand source URLs with supplementary sources
-        existing_sources = self.questions[question_id]["source_urls"]
-        for src in (additional_sources or []):
+        q_data = json.loads(self.questions[question_id])
+        existing_sources = list(q_data.get("source_urls", []))
+        for src in new_sources_list:
             if src not in existing_sources:
                 existing_sources.append(src)
 
-        self.questions[question_id]["status"] = "disputed"
+        q_data["source_urls"] = existing_sources
+        q_data["status"] = "disputed"
+        self.questions[question_id] = json.dumps(q_data)
 
         # Re-trigger resolution with augmented source pool
-        self.resolve_question(question_id)
+        return self.resolve_question(question_id)
 
     @gl.public.view
-    def get_resolution(self, question_id: str) -> dict:
-        """
-        Read-only lookup returning question metadata, consensus status, resolution data,
-        and dispute details.
-        """
+    def get_resolution(self, question_id: str) -> str:
         if question_id not in self.questions:
             raise gl.Rollback(f"Question {question_id} does not exist")
 
-        q = self.questions[question_id]
-        res = self.resolutions.get(question_id, None)
-        disp = self.disputes.get(question_id, None)
+        q_data = json.loads(self.questions[question_id])
+        res_data = json.loads(self.resolutions[question_id]) if question_id in self.resolutions else None
+        disp_data = json.loads(self.disputes[question_id]) if question_id in self.disputes else None
 
-        return {
-            "question": q,
-            "resolution": res,
-            "dispute": disp
-        }
+        return json.dumps({
+            "question": q_data,
+            "resolution": res_data,
+            "dispute": disp_data
+        })

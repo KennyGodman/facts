@@ -8,10 +8,72 @@ prediction market, or bounty resolver) integrates with FactReconciliationOracle.
 import sys
 import os
 import json
+import types
+
+# Provide mock genlayer environment shim if genlayer is not installed in local python environment
+if "genlayer" not in sys.modules:
+    genlayer_mod = types.ModuleType("genlayer")
+
+    class _WriteDecorator:
+        def __call__(self, f):
+            return f
+        @staticmethod
+        def payable(f):
+            return f
+
+    class _MockGl:
+        class public:
+            @staticmethod
+            def view(f):
+                return f
+            write = _WriteDecorator()
+
+        class message:
+            sender_address = "0x0000000000000000000000000000000000000001"
+            value = 1000000000000000
+        class Rollback(Exception):
+            pass
+        class Contract:
+            pass
+        class nondet:
+            class web:
+                @staticmethod
+                def get(url, headers=None):
+                    pass
+            @staticmethod
+            def exec_prompt(prompt):
+                pass
+        class eq_principle:
+            @staticmethod
+            def prompt_non_comparative(*args, **kwargs):
+                fn = kwargs.get("task") or kwargs.get("func") or (args[0] if args else None)
+                return fn() if callable(fn) else ""
+
+    class _MockTreeMap(dict):
+        pass
+
+    class _MockDynArray(list):
+        pass
+
+    class _MockU256(int):
+        pass
+
+    class _MockAddress(str):
+        pass
+
+    genlayer_mod.gl = _MockGl()
+    genlayer_mod.TreeMap = _MockTreeMap
+    genlayer_mod.DynArray = _MockDynArray
+    genlayer_mod.u256 = _MockU256
+    genlayer_mod.Address = _MockAddress
+    genlayer_mod.Rollback = _MockGl.Rollback
+
+    sys.modules["genlayer"] = genlayer_mod
 
 # Add contracts directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "contracts")))
-from fact_reconciliation_oracle import FactReconciliationOracle, gl
+from genlayer import gl, u256
+from fact_reconciliation_oracle import FactReconciliationOracle
 
 
 def run_demo():
@@ -20,8 +82,8 @@ def run_demo():
     print("=" * 70)
 
     # 1. Deploy / Initialize the Oracle
-    oracle = FactReconciliationOracle(min_fee=1000000000000000)
-    gl.message.sender = "0xPredictMarketDApp1111"
+    oracle = FactReconciliationOracle()
+    gl.message.sender_address = "0xPredictMarketDApp1111"
     gl.message.value = 1000000000000000
 
     print("\n[Step 1] Registering a multi-source fact-checking query...")
@@ -69,7 +131,8 @@ def run_demo():
 
     # 3. Read back verified oracle data
     print("\n[Step 3] Querying resolution payload via get_resolution()...")
-    record = oracle.get_resolution(question_id)
+    raw_record = oracle.get_resolution(question_id)
+    record = json.loads(raw_record) if isinstance(raw_record, str) else raw_record
 
     print("\n--- Oracle Result Payload ---")
     print(f"Status:            {record['resolution']['status'].upper()}")

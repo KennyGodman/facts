@@ -2,10 +2,72 @@ import unittest
 import json
 import sys
 import os
+import types
+
+# Provide mock genlayer environment shim if genlayer is not installed in local python environment
+if "genlayer" not in sys.modules:
+    genlayer_mod = types.ModuleType("genlayer")
+
+    class _WriteDecorator:
+        def __call__(self, f):
+            return f
+        @staticmethod
+        def payable(f):
+            return f
+
+    class _MockGl:
+        class public:
+            @staticmethod
+            def view(f):
+                return f
+            write = _WriteDecorator()
+
+        class message:
+            sender_address = "0x0000000000000000000000000000000000000001"
+            value = 1000000000000000
+        class Rollback(Exception):
+            pass
+        class Contract:
+            pass
+        class nondet:
+            class web:
+                @staticmethod
+                def get(url, headers=None):
+                    raise NotImplementedError("Direct mode test must mock gl.nondet.web.get")
+            @staticmethod
+            def exec_prompt(prompt):
+                raise NotImplementedError("Direct mode test must mock gl.nondet.exec_prompt")
+        class eq_principle:
+            @staticmethod
+            def prompt_non_comparative(*args, **kwargs):
+                fn = kwargs.get("task") or kwargs.get("func") or (args[0] if args else None)
+                return fn() if callable(fn) else ""
+
+    class _MockTreeMap(dict):
+        pass
+
+    class _MockDynArray(list):
+        pass
+
+    class _MockU256(int):
+        pass
+
+    class _MockAddress(str):
+        pass
+
+    genlayer_mod.gl = _MockGl()
+    genlayer_mod.TreeMap = _MockTreeMap
+    genlayer_mod.DynArray = _MockDynArray
+    genlayer_mod.u256 = _MockU256
+    genlayer_mod.Address = _MockAddress
+    genlayer_mod.Rollback = _MockGl.Rollback
+
+    sys.modules["genlayer"] = genlayer_mod
 
 # Add contracts directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "contracts")))
-from fact_reconciliation_oracle import FactReconciliationOracle, gl
+from genlayer import gl, u256
+from fact_reconciliation_oracle import FactReconciliationOracle
 
 
 class MockHttpResponse:
@@ -18,9 +80,10 @@ class TestFactReconciliationOracle(unittest.TestCase):
 
     def setUp(self):
         # Reset contract with standard test fee
-        self.oracle = FactReconciliationOracle(min_fee=1000)
-        gl.message.sender = "0xUserAlice1234567890"
-        gl.message.value = 1000
+        self.oracle = FactReconciliationOracle()
+        self.oracle.min_fee = u256(1000)
+        gl.message.sender_address = "0xUserAlice1234567890"
+        gl.message.value = u256(1000)
 
     # -------------------------------------------------------------------------
     # TEST 1: Sources that clearly AGREE → Resolves Cleanly
@@ -74,7 +137,7 @@ class TestFactReconciliationOracle(unittest.TestCase):
         self.oracle.resolve_question(q_id)
 
         # Assertions
-        result = self.oracle.get_resolution(q_id)
+        result = json.loads(self.oracle.get_resolution(q_id))
         self.assertEqual(result["question"]["status"], "resolved")
         self.assertEqual(result["resolution"]["status"], "resolved")
         self.assertFalse(result["resolution"]["conflict_detected"])
@@ -135,7 +198,7 @@ class TestFactReconciliationOracle(unittest.TestCase):
         self.oracle.resolve_question(q_id)
 
         # Assertions
-        result = self.oracle.get_resolution(q_id)
+        result = json.loads(self.oracle.get_resolution(q_id))
         self.assertEqual(result["question"]["status"], "unresolved")
         self.assertEqual(result["resolution"]["status"], "unresolved")
         self.assertTrue(result["resolution"]["conflict_detected"])
@@ -189,7 +252,7 @@ class TestFactReconciliationOracle(unittest.TestCase):
         # Execute resolution — should not throw exception
         self.oracle.resolve_question(q_id)
 
-        result = self.oracle.get_resolution(q_id)
+        result = json.loads(self.oracle.get_resolution(q_id))
         self.assertEqual(result["question"]["status"], "resolved")
         self.assertEqual(result["resolution"]["answer"], "Jane Doe")
         self.assertIn("[FETCH_FAILED]", result["resolution"]["per_source_findings"][urls[0]])
@@ -202,12 +265,12 @@ class TestFactReconciliationOracle(unittest.TestCase):
         Test anti-spam fee requirement and dispute re-triggering with supplementary source.
         """
         # Underpayment should rollback
-        gl.message.value = 500  # Less than min_fee of 1000
+        gl.message.value = u256(500)  # Less than min_fee of 1000
         with self.assertRaises(gl.Rollback):
             self.oracle.register_question("Will tax rate change?", "2026-09-01", ["https://src1.org"])
 
         # Valid registration
-        gl.message.value = 1000
+        gl.message.value = u256(1000)
         q_id = self.oracle.register_question(
             "Will tax rate change?",
             "2026-09-01",
@@ -225,7 +288,7 @@ class TestFactReconciliationOracle(unittest.TestCase):
             "reasoning": "Initial source had no definitive ruling."
         })
         self.oracle.resolve_question(q_id)
-        self.assertEqual(self.oracle.get_resolution(q_id)["question"]["status"], "unresolved")
+        self.assertEqual(json.loads(self.oracle.get_resolution(q_id))["question"]["status"], "unresolved")
 
         # Challenger disputes and adds definitive government portal
         new_source = "https://gov-gazette.gov/tax-announcement"
@@ -250,7 +313,7 @@ class TestFactReconciliationOracle(unittest.TestCase):
             additional_sources=[new_source]
         )
 
-        res = self.oracle.get_resolution(q_id)
+        res = json.loads(self.oracle.get_resolution(q_id))
         self.assertEqual(res["question"]["status"], "resolved")
         self.assertEqual(res["resolution"]["answer"], "Tax rate unchanged at 15%")
         self.assertEqual(res["dispute"]["status"], "settled")
