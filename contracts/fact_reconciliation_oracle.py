@@ -156,6 +156,9 @@ RECONCILIATION INSTRUCTIONS:
    - If sources contradict one another on the core answer, set "status" to "unresolved", "conflict_detected" to true, and "answer" to "CONFLICTING_SOURCES".
    - Do NOT average contradictory numbers, speculate, or force a majority vote.
 4. If sources agree, set "status" to "resolved", "conflict_detected" to false, and provide the concise factual "answer".
+   CRITICAL EVIDENCE-TO-ANSWER VALIDATION REQUIREMENT:
+   The factual "answer" MUST strictly reflect and be directly corroborated by the extracted evidence recorded in "per_source_findings".
+   Never speculate, assume, or extrapolate claims beyond what is explicitly evidenced in "per_source_findings".
 5. Return strictly valid JSON with no markdown wrapping or preamble, matching this exact schema:
 {{
   "status": "resolved" or "unresolved",
@@ -185,19 +188,27 @@ RECONCILIATION INSTRUCTIONS:
         # ---------------------------------------------------------------------
         # 3. Equivalence Principle Consensus
         # ---------------------------------------------------------------------
-        task_description = f"Reconcile facts for claim '{target_text}' from sources: {target_source_urls}"
+        task_description = (
+            f"Reconcile facts and verify evidence-to-answer consistency for claim '{target_text}' "
+            f"against sources: {target_source_urls}"
+        )
         criteria_rules = """
         The candidate JSON must satisfy all criteria:
         1. Valid JSON containing keys: 'status', 'answer', 'confidence', 'conflict_detected', 'per_source_findings', 'reasoning'.
-        2. If 'conflict_detected' is true, 'status' MUST be 'unresolved' and 'answer' MUST be 'CONFLICTING_SOURCES'.
-        3. If 'status' is 'resolved', 'confidence' must be >= 0.70 and sources must be mutually consistent.
-        4. If insufficient or failed sources preclude a definitive answer, 'status' must be 'unresolved' and 'answer' must be 'INSUFFICIENT_DATA'.
-        5. 'per_source_findings' must contain an entry for every source URL evaluated.
+        2. Explicit Evidence-to-Answer Validation Requirement:
+           - If 'status' is 'resolved', the factual 'answer' MUST be independently verified against and strictly match the fetched evidence documented in 'per_source_findings'.
+           - The stored 'answer' must be directly corroborated by the verified source findings without contradiction, distortion, or unsubstantiated extrapolation.
+           - If the factual answer is not directly supported by the fetched evidence in 'per_source_findings', the candidate must be rejected.
+        3. If 'conflict_detected' is true, 'status' MUST be 'unresolved' and 'answer' MUST be 'CONFLICTING_SOURCES'.
+        4. If 'status' is 'resolved', 'confidence' must be >= 0.70 and accessible sources must be mutually consistent.
+        5. If insufficient or failed sources preclude a definitive answer, 'status' must be 'unresolved' and 'answer' must be 'INSUFFICIENT_DATA'.
+        6. 'per_source_findings' must contain an entry for every source URL evaluated.
         """
 
         agreed_verdict_str = gl.eq_principle.prompt_non_comparative(
-            task=validator_fact_reconciliation,
-            criteria=criteria_rules
+            validator_fact_reconciliation,
+            task_description,
+            criteria_rules
         )
 
         try:

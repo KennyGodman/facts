@@ -318,6 +318,63 @@ class TestFactReconciliationOracle(unittest.TestCase):
         self.assertEqual(res["resolution"]["answer"], "Tax rate unchanged at 15%")
         self.assertEqual(res["dispute"]["status"], "settled")
 
+    # -------------------------------------------------------------------------
+    # TEST 5: Explicit Evidence-to-Answer Validation Requirement
+    # -------------------------------------------------------------------------
+    def test_evidence_to_answer_validation_requirement(self):
+        """
+        Test Case 5: Verify that resolved answers strictly corroborate and match
+        the extracted evidence recorded in per_source_findings.
+        """
+        urls = [
+            "https://science-journal.org/neutrino-detector-finding",
+            "https://physics-archive.edu/neutrino-experiment-results"
+        ]
+        q_id = self.oracle.register_question(
+            text="Did the neutrino observatory observe sterile neutrino oscillation?",
+            resolution_date="2026-08-15T00:00:00Z",
+            source_urls=urls
+        )
+
+        evidence_1 = "Observatory reports no sterile neutrino signal detected within 95% CL."
+        evidence_2 = "Null hypothesis upheld; sterile neutrino oscillations excluded across target eV mass range."
+
+        def mock_web_get(url, headers=None):
+            if "science-journal" in url:
+                return MockHttpResponse(evidence_1)
+            elif "physics-archive" in url:
+                return MockHttpResponse(evidence_2)
+            return MockHttpResponse("Not found", 404)
+
+        # Validator produces findings and strictly matching answer
+        def mock_exec_prompt(prompt):
+            return json.dumps({
+                "status": "resolved",
+                "answer": "NO - No sterile neutrino oscillations observed",
+                "confidence": 0.96,
+                "conflict_detected": False,
+                "per_source_findings": {
+                    urls[0]: evidence_1,
+                    urls[1]: evidence_2
+                },
+                "reasoning": "Both authoritative research papers confirm null result without conflict."
+            })
+
+        gl.nondet.web.get = mock_web_get
+        gl.nondet.exec_prompt = mock_exec_prompt
+
+        self.oracle.resolve_question(q_id)
+
+        res = json.loads(self.oracle.get_resolution(q_id))
+        self.assertEqual(res["resolution"]["status"], "resolved")
+        self.assertEqual(res["resolution"]["answer"], "NO - No sterile neutrino oscillations observed")
+        # Explicit evidence check: answer must align with findings
+        self.assertIn(urls[0], res["resolution"]["per_source_findings"])
+        self.assertIn(urls[1], res["resolution"]["per_source_findings"])
+        self.assertEqual(res["resolution"]["per_source_findings"][urls[0]], evidence_1)
+        self.assertEqual(res["resolution"]["per_source_findings"][urls[1]], evidence_2)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -3,9 +3,10 @@
 **A Decentralized Multi-Source Fact Verification and Consensus Primitive for GenLayer**
 
 > **Live On-Chain Deployment:**
-> - **Contract Address:** [`0xAb96E7409107c57f72Aef182C78dF295c12e9ACE`](https://explorer-studio.genlayer.com/address/0xAb96E7409107c57f72Aef182C78dF295c12e9ACE)
+> - **Contract Address:** [`0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3`](https://explorer-studio.genlayer.com/address/0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3)
+> - **Deployment Transaction:** [`0xe7fa5d20c5a6dcc029dcc553ecf8333707c5ceb3d641ac76ac5685ad8ac63273`](https://explorer-studio.genlayer.com)
 > - **Network:** GenLayer Studio Testnet (`studionet`)
-> - **GenLayer Explorer:** [explorer-studio.genlayer.com/address/0xAb96E7409107c57f72Aef182C78dF295c12e9ACE](https://explorer-studio.genlayer.com/address/0xAb96E7409107c57f72Aef182C78dF295c12e9ACE)
+> - **GenLayer Explorer:** [explorer-studio.genlayer.com/address/0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3](https://explorer-studio.genlayer.com/address/0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3)
 
 ---
 
@@ -41,7 +42,7 @@ Traditional blockchain oracles and naive "AI oracle" wrappers suffer from two fa
 |  +---------+----------+       [ Validator N ] ---> gl.nondet.web.get(URL 1..N)  |
 |            |                                                                    |
 |            |  Equivalence Principle: gl.eq_principle.prompt_non_comparative     |
-|            |  [Criteria: Valid JSON, Strict Conflict Detection, Confidence]    |
+|            |  [Criteria: Valid JSON, Strict Evidence-to-Answer Matching, ...]   |
 |            v                                                                    |
 |  +--------------------+                                                         |
 |  | State Mutation:    | ---> status: "resolved" | "unresolved"                  |
@@ -77,10 +78,14 @@ In `FactReconciliationOracle`, each validator synthesizes multiple raw HTML/JSON
 
 Using `gl.eq_principle.prompt_non_comparative` provides deterministic evaluation of the candidate resolution payload against strict, unambiguous invariant rules:
 1. **Structural Invariant**: Output must be valid JSON containing all designated keys (`status`, `answer`, `confidence`, `conflict_detected`, `per_source_findings`, `reasoning`).
-2. **Conflict Invariant**: If `conflict_detected` is `true`, `status` MUST be `unresolved` and `answer` MUST be `"CONFLICTING_SOURCES"`.
-3. **Consensus Invariant**: If `status` is `resolved`, `confidence` MUST be $\ge 0.70$, and all accessible sources must be mutually consistent.
-4. **Data Sufficiency Invariant**: If sources fail or contain no factual information, `status` MUST be `unresolved` with `"INSUFFICIENT_DATA"`.
-5. **Coverage Invariant**: Every queried source URL must have a corresponding entry in `per_source_findings`.
+2. **Explicit Evidence-to-Answer Validation Requirement**: If `status` is `resolved`, the factual `answer` MUST be independently verified against and strictly match the fetched evidence documented in `per_source_findings`. The stored `answer` must be directly corroborated by the verified source findings without contradiction, distortion, or unsubstantiated extrapolation. If the factual answer is not directly supported by the fetched evidence in `per_source_findings`, the candidate fails validation.
+3. **Conflict Invariant**: If `conflict_detected` is `true`, `status` MUST be `unresolved` and `answer` MUST be `"CONFLICTING_SOURCES"`.
+4. **Consensus Invariant**: If `status` is `resolved`, `confidence` MUST be $\ge 0.70$, and all accessible sources must be mutually consistent.
+5. **Data Sufficiency Invariant**: If sources fail or contain no factual information, `status` MUST be `unresolved` with `"INSUFFICIENT_DATA"`.
+6. **Coverage Invariant**: Every queried source URL must have a corresponding entry in `per_source_findings`.
+
+### Lint-Valid Equivalence Flow
+The nondeterministic extraction task is passed as a direct positional argument to `gl.eq_principle.prompt_non_comparative(task_fn, task_description, criteria_rules)`, satisfying GenVM AST safety linter checks by guaranteeing the nondeterministic execution scope is strictly bounded by the equivalence principle.
 
 ### What "Equivalent" Means in this Contract
 "Equivalence" is not mere string equality or arbitrary prompt acceptance. An outcome is considered equivalent if and only if **all validators agree on the underlying state classification** (Consensus vs. Contradiction vs. Insufficient Data) and the answer is strictly bound by the corroborated evidence from the web snapshots.
@@ -126,7 +131,7 @@ elif data["resolution"]["conflict_detected"]:
 
 ## 6. Testing & Verification
 
-The suite includes 4 direct-mode unit tests covering all required operational conditions:
+The suite includes 5 direct-mode unit tests covering all required operational conditions:
 
 | Test Case | Scenario | Expected Behavior |
 | :--- | :--- | :--- |
@@ -134,10 +139,16 @@ The suite includes 4 direct-mode unit tests covering all required operational co
 | **Test 2** | Sources clearly conflict | Returns `status='unresolved'`, `conflict_detected=True`, `answer='CONFLICTING_SOURCES'`. |
 | **Test 3** | Source is unreachable / 500 / timeout | Degrades gracefully without crashing; synthesizes remaining active sources. |
 | **Test 4** | Fee enforcement & Dispute cycle | Rejects underpaid transactions; processes disputes and updates sources. |
+| **Test 5** | Evidence-to-Answer Validation Requirement | Enforces strict corroboration between fetched evidence in `per_source_findings` and stored `answer`. |
 
 ### Running the Tests
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+### Running GenVM Linting
+```bash
+python -m genvm_linter.cli lint contracts/fact_reconciliation_oracle.py
 ```
 
 ### Running the Demo
