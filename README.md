@@ -3,10 +3,10 @@
 **A Decentralized Multi-Source Fact Verification and Consensus Primitive for GenLayer**
 
 > **Live On-Chain Deployment:**
-> - **Contract Address:** [`0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3`](https://explorer-studio.genlayer.com/address/0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3)
-> - **Deployment Transaction:** [`0xe7fa5d20c5a6dcc029dcc553ecf8333707c5ceb3d641ac76ac5685ad8ac63273`](https://explorer-studio.genlayer.com)
+> - **Contract Address:** [`0x98997ec70AC233f8148f0dAD0dD6b3351413D495`](https://explorer-studio.genlayer.com/address/0x98997ec70AC233f8148f0dAD0dD6b3351413D495)
+> - **Deployment Transaction:** [`0x9a7e413e419eff9ad6a7f868ef24b5f254e12618586cc49c9ab8f445bc11f24e`](https://explorer-studio.genlayer.com)
 > - **Network:** GenLayer Studio Testnet (`studionet`)
-> - **GenLayer Explorer:** [explorer-studio.genlayer.com/address/0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3](https://explorer-studio.genlayer.com/address/0xF41e366Faa34E8D6ccAeABab3dA214748A8D76a3)
+> - **GenLayer Explorer:** [explorer-studio.genlayer.com/address/0x98997ec70AC233f8148f0dAD0dD6b3351413D495](https://explorer-studio.genlayer.com/address/0x98997ec70AC233f8148f0dAD0dD6b3351413D495)
 
 ---
 
