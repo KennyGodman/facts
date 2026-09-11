@@ -112,9 +112,9 @@ class FactReconciliationOracle(gl.Contract):
         target_source_urls = list(q_data["source_urls"])
 
         # ---------------------------------------------------------------------
-        # 2. Non-deterministic Execution Block (Each validator runs independently)
+        # 2. Leader Fact Reconciliation (Proposes candidate resolution)
         # ---------------------------------------------------------------------
-        def validator_fact_reconciliation() -> str:
+        def leader_fact_reconciliation() -> str:
             # Step A: Fetch external web snapshots independently
             extracted_sources = {}
             for url in target_source_urls:
@@ -132,9 +132,9 @@ class FactReconciliationOracle(gl.Contract):
 
             sources_json_str = json.dumps(extracted_sources)
 
-            # Step B: Validator Synthesis Prompt
+            # Step B: Leader Synthesis Prompt
             synthesis_prompt = f"""
-You are an objective consensus validator on the GenLayer network.
+You are an objective consensus leader on the GenLayer network.
 Your task is to reconcile facts regarding a specific question based ONLY on raw external web snapshots.
 
 QUESTION TO VERIFY:
@@ -156,7 +156,7 @@ RECONCILIATION INSTRUCTIONS:
    - If sources contradict one another on the core answer, set "status" to "unresolved", "conflict_detected" to true, and "answer" to "CONFLICTING_SOURCES".
    - Do NOT average contradictory numbers, speculate, or force a majority vote.
 4. If sources agree, set "status" to "resolved", "conflict_detected" to false, and provide the concise factual "answer".
-   CRITICAL EVIDENCE-TO-ANSWER VALIDATION REQUIREMENT:
+   CRITICAL EVIDENCE-TO-ANSWER REQUIREMENT:
    The factual "answer" MUST strictly reflect and be directly corroborated by the extracted evidence recorded in "per_source_findings".
    Never speculate, assume, or extrapolate claims beyond what is explicitly evidenced in "per_source_findings".
 5. Return strictly valid JSON with no markdown wrapping or preamble, matching this exact schema:
@@ -186,29 +186,134 @@ RECONCILIATION INSTRUCTIONS:
             return clean_response
 
         # ---------------------------------------------------------------------
-        # 3. Equivalence Principle Consensus
+        # 3. Validator Fact Verification (Independently acquires & verifies evidence)
         # ---------------------------------------------------------------------
-        task_description = (
-            f"Reconcile facts and verify evidence-to-answer consistency for claim '{target_text}' "
-            f"against sources: {target_source_urls}"
-        )
-        criteria_rules = """
-        The candidate JSON must satisfy all criteria:
-        1. Valid JSON containing keys: 'status', 'answer', 'confidence', 'conflict_detected', 'per_source_findings', 'reasoning'.
-        2. Explicit Evidence-to-Answer Validation Requirement:
-           - If 'status' is 'resolved', the factual 'answer' MUST be independently verified against and strictly match the fetched evidence documented in 'per_source_findings'.
-           - The stored 'answer' must be directly corroborated by the verified source findings without contradiction, distortion, or unsubstantiated extrapolation.
-           - If the factual answer is not directly supported by the fetched evidence in 'per_source_findings', the candidate must be rejected.
-        3. If 'conflict_detected' is true, 'status' MUST be 'unresolved' and 'answer' MUST be 'CONFLICTING_SOURCES'.
-        4. If 'status' is 'resolved', 'confidence' must be >= 0.70 and accessible sources must be mutually consistent.
-        5. If insufficient or failed sources preclude a definitive answer, 'status' must be 'unresolved' and 'answer' must be 'INSUFFICIENT_DATA'.
-        6. 'per_source_findings' must contain an entry for every source URL evaluated.
-        """
+        def validator_fact_verification(leader_res) -> bool:
+            """
+            Independent Validator Verification:
+            - Validates return type and candidate JSON structure.
+            - Independently fetches each target source URL (acquiring fresh evidence).
+            - Re-evaluates per-source evidence against actual fetched page content.
+            - Rejects any candidate that fabricated per-source findings, suppressed conflicts,
+              or provided a factual answer not corroborated by independently verified evidence.
+            """
+            if not isinstance(leader_res, gl.vm.Return):
+                return False
 
-        agreed_verdict_str = gl.eq_principle.prompt_non_comparative(
-            validator_fact_reconciliation,
-            task_description,
-            criteria_rules
+            try:
+                candidate = json.loads(leader_res.calldata) if isinstance(leader_res.calldata, str) else leader_res.calldata
+            except Exception:
+                return False
+
+            if not isinstance(candidate, dict):
+                return False
+
+            required_keys = ["status", "answer", "confidence", "conflict_detected", "per_source_findings", "reasoning"]
+            if not all(k in candidate for k in required_keys):
+                return False
+
+            cand_status = str(candidate.get("status", ""))
+            cand_answer = str(candidate.get("answer", ""))
+            cand_conflict = bool(candidate.get("conflict_detected", False))
+            cand_confidence = float(candidate.get("confidence", 0.0))
+            cand_findings = candidate.get("per_source_findings", {})
+
+            if cand_status not in ("resolved", "unresolved"):
+                return False
+            if not isinstance(cand_findings, dict):
+                return False
+
+            # Every source URL must have a committed finding entry
+            for url in target_source_urls:
+                if url not in cand_findings:
+                    return False
+
+            # Structural consistency checks
+            if cand_conflict and (cand_status != "unresolved" or cand_answer != "CONFLICTING_SOURCES"):
+                return False
+            if cand_status == "resolved" and (cand_confidence < 0.70 or cand_conflict):
+                return False
+
+            # -----------------------------------------------------------------
+            # Step A: Independent Evidence Acquisition by Validator
+            # -----------------------------------------------------------------
+            validator_sources = {}
+            for url in target_source_urls:
+                try:
+                    res = gl.nondet.web.get(url, headers={
+                        "User-Agent": "GenLayer-Oracle-Validator/1.0",
+                        "Accept": "text/html,application/json,text/plain"
+                    })
+                    raw_text = getattr(res, "text", str(res))
+                    validator_sources[url] = raw_text[:3500] if raw_text else "[Empty response]"
+                except Exception as e:
+                    validator_sources[url] = f"[FETCH_FAILED]: {str(e)}"
+
+            validator_sources_json_str = json.dumps(validator_sources)
+            candidate_json_str = json.dumps(candidate)
+
+            # -----------------------------------------------------------------
+            # Step B: Independent LLM Verification & Factual Binding Prompt
+            # -----------------------------------------------------------------
+            verification_prompt = f"""
+You are an independent consensus validator on the GenLayer network.
+Your task is to independently verify a candidate fact reconciliation against raw web evidence YOU independently fetched.
+
+QUESTION TO VERIFY:
+"{target_text}"
+
+RESOLUTION DATE / CRITERIA:
+"{target_resolution_date}"
+
+INDEPENDENTLY FETCHED WEB EVIDENCE (Directly acquired by this validator node):
+{validator_sources_json_str}
+
+LEADER CANDIDATE TO VERIFY:
+{candidate_json_str}
+
+STRICT VALIDATION AND REJECTION RULES:
+1. INDEPENDENT EVIDENCE VERIFICATION:
+   - Compare the candidate's committed "per_source_findings" against the actual content of the independently fetched pages above.
+   - If the candidate fabricated, misrepresented, or distorted what the fetched sources actually state (even if internally self-consistent), you MUST REJECT (is_valid = false).
+2. INDEPENDENT CONFLICT DETECTION:
+   - Assess whether the independently fetched sources contradict each other regarding the question.
+   - If credible sources conflict, the candidate MUST have "conflict_detected": true, "status": "unresolved", and "answer": "CONFLICTING_SOURCES".
+   - If sources conflict but candidate claimed "resolved" (e.g. by supplying one-sided or fabricated findings), you MUST REJECT (is_valid = false).
+3. FACTUAL BINDING:
+   - If "status" is "resolved", the proposed "answer" MUST strictly match and be directly corroborated by the independently acquired evidence.
+   - If the factual answer is not corroborated by, or contradicts, the independently fetched pages, you MUST REJECT (is_valid = false).
+   - If sources are unreachable or lack relevant data to resolve the question, "status" MUST be "unresolved" and "answer" MUST be "INSUFFICIENT_DATA".
+4. CONFIDENCE:
+   - If "status" is "resolved", "confidence" must be >= 0.70.
+
+Return strictly valid JSON with no markdown wrapping or extra text:
+{{
+  "is_valid": <true or false>,
+  "reason": "<clear explanation of independent verification verdict>"
+}}
+"""
+            raw_eval = gl.nondet.exec_prompt(verification_prompt)
+            clean_eval = raw_eval.strip()
+            if clean_eval.startswith("```json"):
+                clean_eval = clean_eval[7:]
+            if clean_eval.startswith("```"):
+                clean_eval = clean_eval[3:]
+            if clean_eval.endswith("```"):
+                clean_eval = clean_eval[:-3]
+            clean_eval = clean_eval.strip()
+
+            try:
+                eval_data = json.loads(clean_eval)
+                return bool(eval_data.get("is_valid", False))
+            except Exception:
+                return False
+
+        # ---------------------------------------------------------------------
+        # 4. Equivalence Principle Consensus via run_nondet_unsafe
+        # ---------------------------------------------------------------------
+        agreed_verdict_str = gl.vm.run_nondet_unsafe(
+            leader_fact_reconciliation,
+            validator_fact_verification
         )
 
         try:

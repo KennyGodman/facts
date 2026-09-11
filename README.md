@@ -37,17 +37,22 @@ Traditional blockchain oracles and naive "AI oracle" wrappers suffer from two fa
 |  +---------+----------+                                                         |
 |            |                                                                    |
 |            v                                                                    |
-|  +--------------------+       [ Validator 1 ] ---> gl.nondet.web.get(URL 1..N)  |
-|  |  resolve_question  |  ==>  [ Validator 2 ] ---> gl.nondet.web.get(URL 1..N)  |
-|  +---------+----------+       [ Validator N ] ---> gl.nondet.web.get(URL 1..N)  |
+|  +--------------------+   PHASE 1: LEADER (leader_fact_reconciliation)          |
+|  |  resolve_question  |   - Fetches target URLs via gl.nondet.web.get()         |
+|  +---------+----------+   - Synthesizes findings & proposes candidate JSON      |
 |            |                                                                    |
-|            |  Equivalence Principle: gl.eq_principle.prompt_non_comparative     |
-|            |  [Criteria: Valid JSON, Strict Evidence-to-Answer Matching, ...]   |
+|            |              PHASE 2: VALIDATOR (validator_fact_verification)      |
+|            |              - Independently fetches target URLs (fresh evidence)  |
+|            |              - Verifies committed findings against fetched pages   |
+|            |              - Rejects fabricated findings or answer mismatches    |
+|            v                                                                    |
+|  Equivalence Principle: gl.vm.run_nondet_unsafe(leader, validator)              |
+|            |                                                                    |
 |            v                                                                    |
 |  +--------------------+                                                         |
 |  | State Mutation:    | ---> status: "resolved" | "unresolved"                  |
 |  | resolutions[id]    | ---> answer: consensus answer OR "CONFLICTING_SOURCES"  |
-|  +---------+----------+ ---> per_source_findings: { url -> evidence }           |
+|  +---------+----------+ ---> per_source_findings: { url -> verified_evidence }  |
 |            |                                                                    |
 |            v (If challenged with new sources + fee)                             |
 |  +--------------------+                                                         |
@@ -73,22 +78,26 @@ disputes: dict[str, dict]
 
 ## 3. Consensus Logic & The Equivalence Principle
 
-### Why Non-Comparative Validation (`gl.eq_principle.prompt_non_comparative`) Fits Here
-In `FactReconciliationOracle`, each validator synthesizes multiple raw HTML/JSON texts into a structured judgment payload.
+### Independent Evidence Acquisition & Verification (`gl.vm.run_nondet_unsafe`)
+In decentralized consensus, **validators must never trust the leader's reported evidence**. If validators only inspect the candidate output, a malicious or hallucinating leader could supply internally self-consistent `per_source_findings` for conflicting or false claims (e.g. claiming both sources agreed when one actually disagreed) and pass superficial checks.
 
-Using `gl.eq_principle.prompt_non_comparative` provides deterministic evaluation of the candidate resolution payload against strict, unambiguous invariant rules:
-1. **Structural Invariant**: Output must be valid JSON containing all designated keys (`status`, `answer`, `confidence`, `conflict_detected`, `per_source_findings`, `reasoning`).
-2. **Explicit Evidence-to-Answer Validation Requirement**: If `status` is `resolved`, the factual `answer` MUST be independently verified against and strictly match the fetched evidence documented in `per_source_findings`. The stored `answer` must be directly corroborated by the verified source findings without contradiction, distortion, or unsubstantiated extrapolation. If the factual answer is not directly supported by the fetched evidence in `per_source_findings`, the candidate fails validation.
-3. **Conflict Invariant**: If `conflict_detected` is `true`, `status` MUST be `unresolved` and `answer` MUST be `"CONFLICTING_SOURCES"`.
-4. **Consensus Invariant**: If `status` is `resolved`, `confidence` MUST be $\ge 0.70$, and all accessible sources must be mutually consistent.
-5. **Data Sufficiency Invariant**: If sources fail or contain no factual information, `status` MUST be `unresolved` with `"INSUFFICIENT_DATA"`.
-6. **Coverage Invariant**: Every queried source URL must have a corresponding entry in `per_source_findings`.
+`FactReconciliationOracle` solves this using GenLayer's recommended **independent verification pattern** with `gl.vm.run_nondet_unsafe(leader_fact_reconciliation, validator_fact_verification)`:
 
-### Lint-Valid Equivalence Flow
-The nondeterministic extraction task is passed as a direct positional argument to `gl.eq_principle.prompt_non_comparative(task_fn, task_description, criteria_rules)`, satisfying GenVM AST safety linter checks by guaranteeing the nondeterministic execution scope is strictly bounded by the equivalence principle.
+1. **Phase 1: Leader Execution (`leader_fact_reconciliation`)**:
+   - The leader node fetches each URL in `source_urls` with error isolation (`gl.nondet.web.get`).
+   - The leader synthesizes per-source evidence and evaluates cross-source consistency.
+   - It outputs a structured candidate resolution containing `status`, `answer`, `confidence`, `conflict_detected`, `per_source_findings`, and `reasoning`.
+
+2. **Phase 2: Independent Validator Verification (`validator_fact_verification`)**:
+   - Every validator node in the committee independently executes the verification function.
+   - **Independent Evidence Acquisition**: Each validator directly calls `gl.nondet.web.get()` on the target URLs to acquire its own fresh snapshot of the source evidence.
+   - **Committed Evidence Verification**: The validator compares the leader's committed `per_source_findings` against the actual content of the independently fetched pages. If findings were fabricated or distorted, the validator **rejects** the candidate (`is_valid = false`).
+   - **Independent Conflict Verification**: If the independently fetched pages reveal a conflict, the candidate MUST report `conflict_detected: true`, `status: "unresolved"`, and `answer: "CONFLICTING_SOURCES"`. Any attempt to force a resolved consensus over conflicting sources is **rejected**.
+   - **Factual Binding**: If `status` is `resolved`, the proposed `answer` must strictly and directly follow from the independently acquired evidence.
+   - **Confidence Threshold**: For resolved answers, `confidence` must be $\ge 0.70$.
 
 ### What "Equivalent" Means in this Contract
-"Equivalence" is not mere string equality or arbitrary prompt acceptance. An outcome is considered equivalent if and only if **all validators agree on the underlying state classification** (Consensus vs. Contradiction vs. Insufficient Data) and the answer is strictly bound by the corroborated evidence from the web snapshots.
+Consensus is achieved when the validator committee confirms that the leader's committed findings and factual answer **truthfully bind to the independently acquired live web evidence**. If the candidate fails any check, validators reject the proposal, triggering leader rotation or transaction rollback.
 
 ---
 
@@ -131,15 +140,16 @@ elif data["resolution"]["conflict_detected"]:
 
 ## 6. Testing & Verification
 
-The suite includes 5 direct-mode unit tests covering all required operational conditions:
+The suite includes 6 direct-mode unit tests covering all required operational conditions:
 
 | Test Case | Scenario | Expected Behavior |
 | :--- | :--- | :--- |
-| **Test 1** | Sources clearly agree | Resolves cleanly (`status='resolved'`, confidence $\ge 0.70$, factual answer). |
+| **Test 1** | Sources clearly agree | Resolves cleanly (`status='resolved'`, confidence $\ge 0.70$, factual answer verified). |
 | **Test 2** | Sources clearly conflict | Returns `status='unresolved'`, `conflict_detected=True`, `answer='CONFLICTING_SOURCES'`. |
 | **Test 3** | Source is unreachable / 500 / timeout | Degrades gracefully without crashing; synthesizes remaining active sources. |
 | **Test 4** | Fee enforcement & Dispute cycle | Rejects underpaid transactions; processes disputes and updates sources. |
-| **Test 5** | Evidence-to-Answer Validation Requirement | Enforces strict corroboration between fetched evidence in `per_source_findings` and stored `answer`. |
+| **Test 5** | Byzantine Candidate Rejection (Fabricated Findings) | Candidate supplies self-consistent findings for conflicting sources; validator independently acquires real pages, detects the contradiction, and **rejects** the candidate. |
+| **Test 6** | Answer Mismatch Rejection | Candidate proposes a factual answer not corroborated by the independently acquired source evidence; validator detects mismatch and **rejects** the candidate. |
 
 ### Running the Tests
 ```bash

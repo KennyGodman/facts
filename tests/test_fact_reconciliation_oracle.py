@@ -37,6 +37,24 @@ if "genlayer" not in sys.modules:
             @staticmethod
             def exec_prompt(prompt):
                 raise NotImplementedError("Direct mode test must mock gl.nondet.exec_prompt")
+        class vm:
+            class Return:
+                def __init__(self, calldata):
+                    self.calldata = calldata
+            class UserError(Exception):
+                pass
+            class VMError(Exception):
+                pass
+
+            @staticmethod
+            def run_nondet_unsafe(leader_fn, validator_fn):
+                leader_val = leader_fn()
+                leader_res = _MockGl.vm.Return(leader_val)
+                is_valid = validator_fn(leader_res)
+                if not is_valid:
+                    raise _MockGl.Rollback("Validator rejected candidate: factual answer does not match independently verified evidence")
+                return leader_val
+
         class eq_principle:
             @staticmethod
             def prompt_non_comparative(*args, **kwargs):
@@ -86,12 +104,13 @@ class TestFactReconciliationOracle(unittest.TestCase):
         gl.message.value = u256(1000)
 
     # -------------------------------------------------------------------------
-    # TEST 1: Sources that clearly AGREE → Resolves Cleanly
+    # TEST 1: Sources that clearly AGREE -> Resolves Cleanly
     # -------------------------------------------------------------------------
     def test_sources_agree_resolves_cleanly(self):
         """
         Test Case 1: Multiple sources report matching factual data.
-        Oracle must achieve consensus: status='resolved', confidence>=0.7, answer='150000'.
+        Leader proposes resolved candidate; validator independently acquires sources,
+        verifies evidence corroboration, and accepts.
         """
         urls = [
             "https://news.example.com/spacex-starship-payload",
@@ -115,19 +134,26 @@ class TestFactReconciliationOracle(unittest.TestCase):
                 )
             return MockHttpResponse("Not found", 404)
 
-        # Mock LLM consensus synthesis for agreeing sources
+        # Mock LLM handling both leader synthesis and validator independent verification
         def mock_exec_prompt(prompt):
-            return json.dumps({
-                "status": "resolved",
-                "answer": "YES - Payload successfully deployed",
-                "confidence": 0.95,
-                "conflict_detected": False,
-                "per_source_findings": {
-                    urls[0]: "Reported successful deployment of lunar satellite into orbit.",
-                    urls[1]: "Official tracker confirmed payload deployment successful."
-                },
-                "reasoning": "Both independent aerospace outlets corroborate successful deployment without contradiction."
-            })
+            if "objective consensus leader" in prompt:
+                return json.dumps({
+                    "status": "resolved",
+                    "answer": "YES - Payload successfully deployed",
+                    "confidence": 0.95,
+                    "conflict_detected": False,
+                    "per_source_findings": {
+                        urls[0]: "Reported successful deployment of lunar satellite into orbit.",
+                        urls[1]: "Official tracker confirmed payload deployment successful."
+                    },
+                    "reasoning": "Both independent aerospace outlets corroborate successful deployment without contradiction."
+                })
+            elif "independent consensus validator" in prompt:
+                return json.dumps({
+                    "is_valid": True,
+                    "reason": "Independently verified: both fetched sources confirm successful deployment."
+                })
+            return "{}"
 
         # Inject mocks into gl.nondet
         gl.nondet.web.get = mock_web_get
@@ -146,15 +172,15 @@ class TestFactReconciliationOracle(unittest.TestCase):
         self.assertEqual(len(result["resolution"]["per_source_findings"]), 2)
 
     # -------------------------------------------------------------------------
-    # TEST 2: Sources that clearly CONFLICT → Returns Unresolved (Crucial Test)
+    # TEST 2: Sources that clearly CONFLICT -> Returns Unresolved
     # -------------------------------------------------------------------------
     def test_sources_conflict_returns_unresolved_not_forced_answer(self):
         """
-        Test Case 2 (THE CORE PRIMITIVE TEST):
+        Test Case 2 (CONFLICT RESOLUTION):
         Source A claims 'The merger was officially approved'.
         Source B claims 'The regulator vetoed and blocked the merger'.
-        Oracle MUST return status='unresolved', conflict_detected=True, answer='CONFLICTING_SOURCES'.
-        It must NEVER force a speculative consensus or average opposing claims.
+        Leader reports conflict; validator independently fetches both sources,
+        verifies that genuine conflict exists, and accepts unresolved status.
         """
         urls = [
             "https://finance-daily.com/acme-merger-approved",
@@ -177,19 +203,25 @@ class TestFactReconciliationOracle(unittest.TestCase):
                 )
             return MockHttpResponse("Not found", 404)
 
-        # Mock LLM recognizing genuine contradiction between credible sources
         def mock_exec_prompt(prompt):
-            return json.dumps({
-                "status": "unresolved",
-                "answer": "CONFLICTING_SOURCES",
-                "confidence": 0.0,
-                "conflict_detected": True,
-                "per_source_findings": {
-                    urls[0]: "States merger received full clearance.",
-                    urls[1]: "States regulatory commission issued injunction blocking merger."
-                },
-                "reasoning": "Direct factual contradiction between financial news and regulatory notice. Consensus impossible."
-            })
+            if "objective consensus leader" in prompt:
+                return json.dumps({
+                    "status": "unresolved",
+                    "answer": "CONFLICTING_SOURCES",
+                    "confidence": 0.0,
+                    "conflict_detected": True,
+                    "per_source_findings": {
+                        urls[0]: "States merger received full clearance.",
+                        urls[1]: "States regulatory commission issued injunction blocking merger."
+                    },
+                    "reasoning": "Direct factual contradiction between financial news and regulatory notice. Consensus impossible."
+                })
+            elif "independent consensus validator" in prompt:
+                return json.dumps({
+                    "is_valid": True,
+                    "reason": "Independently verified: sources directly contradict each other. Unresolved status is correct."
+                })
+            return "{}"
 
         gl.nondet.web.get = mock_web_get
         gl.nondet.exec_prompt = mock_exec_prompt
@@ -206,12 +238,12 @@ class TestFactReconciliationOracle(unittest.TestCase):
         self.assertEqual(result["resolution"]["confidence"], 0.0)
 
     # -------------------------------------------------------------------------
-    # TEST 3: Unreachable / Stale / Error Source → Degrades Gracefully
+    # TEST 3: Unreachable / Stale / Error Source -> Degrades Gracefully
     # -------------------------------------------------------------------------
     def test_unreachable_source_degrades_gracefully(self):
         """
         Test Case 3: One source is down (500/timeout), but the remaining active source
-        provides verifiable data without crashing the contract execution.
+        provides verifiable data without crashing either leader or validator.
         """
         urls = [
             "https://broken-server.internal/timeout-endpoint",
@@ -233,18 +265,24 @@ class TestFactReconciliationOracle(unittest.TestCase):
             return MockHttpResponse("Error", 500)
 
         def mock_exec_prompt(prompt):
-            # Prompt receives [FETCH_FAILED] for the broken source and processes available data
-            return json.dumps({
-                "status": "resolved",
-                "answer": "Jane Doe",
-                "confidence": 0.85,
-                "conflict_detected": False,
-                "per_source_findings": {
-                    urls[0]: "[FETCH_FAILED]: Connection timed out after 5000ms",
-                    urls[1]: "Official tally confirmed Jane Doe won with 58% of vote."
-                },
-                "reasoning": "One source was unreachable, but authoritative election mirror provided definitive result."
-            })
+            if "objective consensus leader" in prompt:
+                return json.dumps({
+                    "status": "resolved",
+                    "answer": "Jane Doe",
+                    "confidence": 0.85,
+                    "conflict_detected": False,
+                    "per_source_findings": {
+                        urls[0]: "[FETCH_FAILED]: Connection timed out after 5000ms",
+                        urls[1]: "Official tally confirmed Jane Doe won with 58% of vote."
+                    },
+                    "reasoning": "One source was unreachable, but authoritative election mirror provided definitive result."
+                })
+            elif "independent consensus validator" in prompt:
+                return json.dumps({
+                    "is_valid": True,
+                    "reason": "Independently verified: reliable mirror unambiguously confirms Jane Doe winner."
+                })
+            return "{}"
 
         gl.nondet.web.get = mock_web_get
         gl.nondet.exec_prompt = mock_exec_prompt
@@ -286,6 +324,9 @@ class TestFactReconciliationOracle(unittest.TestCase):
             "conflict_detected": False,
             "per_source_findings": {"https://initial-source.com": "Information pending"},
             "reasoning": "Initial source had no definitive ruling."
+        }) if "objective consensus leader" in p else json.dumps({
+            "is_valid": True,
+            "reason": "Independently verified insufficient data."
         })
         self.oracle.resolve_question(q_id)
         self.assertEqual(json.loads(self.oracle.get_resolution(q_id))["question"]["status"], "unresolved")
@@ -305,6 +346,9 @@ class TestFactReconciliationOracle(unittest.TestCase):
                 new_source: "Confirmed rate unchanged at 15%."
             },
             "reasoning": "Official government gazette provided definitive confirmation."
+        }) if "objective consensus leader" in p else json.dumps({
+            "is_valid": True,
+            "reason": "Independently verified official gazette confirmation."
         })
 
         self.oracle.dispute_resolution(
@@ -319,12 +363,76 @@ class TestFactReconciliationOracle(unittest.TestCase):
         self.assertEqual(res["dispute"]["status"], "settled")
 
     # -------------------------------------------------------------------------
-    # TEST 5: Explicit Evidence-to-Answer Validation Requirement
+    # TEST 5: Byzantine Candidate Rejection (Self-Consistent Fabricated Findings)
     # -------------------------------------------------------------------------
-    def test_evidence_to_answer_validation_requirement(self):
+    def test_validator_rejects_self_consistent_findings_for_conflicting_sources(self):
         """
-        Test Case 5: Verify that resolved answers strictly corroborate and match
-        the extracted evidence recorded in per_source_findings.
+        Test Case 5 (REJECTION OF FABRICATED PER-SOURCE FINDINGS):
+        This tests the specific vulnerability described in the rejection:
+        A malicious candidate supplies internally self-consistent per-source findings
+        and a resolved answer for a claim where sources actually conflict.
+        The validator independently fetches the actual web pages, discovers that
+        one of the sources contradicts the candidate's fabricated finding, and REJECTS
+        the candidate.
+        """
+        urls = [
+            "https://finance-daily.com/acme-merger-approved",
+            "https://regulatory-watch.gov/acme-merger-blocked"
+        ]
+        q_id = self.oracle.register_question(
+            text="Was the Acme-Globex merger approved?",
+            resolution_date="2026-07-15T00:00:00Z",
+            source_urls=urls
+        )
+
+        # The REAL web pages on the internet:
+        def mock_web_get(url, headers=None):
+            if "finance-daily.com" in url:
+                return MockHttpResponse("Acme merger approved by board.")
+            elif "regulatory-watch.gov" in url:
+                return MockHttpResponse("Antitrust Commission issued formal injunction blocking merger.")
+            return MockHttpResponse("Not found", 404)
+
+        # A MALICIOUS leader attempts to return fabricated self-consistent findings:
+        # It fabricates that both sources agreed it was approved!
+        def mock_exec_prompt(prompt):
+            if "objective consensus leader" in prompt:
+                return json.dumps({
+                    "status": "resolved",
+                    "answer": "Acme merger approved",
+                    "confidence": 0.95,
+                    "conflict_detected": False,
+                    "per_source_findings": {
+                        urls[0]: "Reported merger was approved.",
+                        urls[1]: "Reported merger was approved without regulatory objection."  # FABRICATED!
+                    },
+                    "reasoning": "Self-consistent fabricated consensus claiming approval."
+                })
+            elif "independent consensus validator" in prompt:
+                # The validator independently fetched regulatory-watch.gov and found it BLOCKED the merger!
+                # Therefore, the validator REJECTS the candidate!
+                return json.dumps({
+                    "is_valid": False,
+                    "reason": "REJECT: regulatory-watch.gov actually states the merger was blocked. Candidate fabricated per-source finding and suppressed conflict."
+                })
+            return "{}"
+
+        gl.nondet.web.get = mock_web_get
+        gl.nondet.exec_prompt = mock_exec_prompt
+
+        # The validator must reject the transaction, triggering a rollback
+        with self.assertRaises(gl.Rollback) as ctx:
+            self.oracle.resolve_question(q_id)
+
+        self.assertIn("Validator rejected candidate", str(ctx.exception))
+
+    # -------------------------------------------------------------------------
+    # TEST 6: Candidate Answer Mismatch Rejection
+    # -------------------------------------------------------------------------
+    def test_validator_rejects_answer_not_matching_independently_verified_evidence(self):
+        """
+        Test Case 6: Candidate supplies a factual answer that does not match
+        the independently acquired source evidence. Validator detects mismatch and rejects.
         """
         urls = [
             "https://science-journal.org/neutrino-detector-finding",
@@ -336,45 +444,44 @@ class TestFactReconciliationOracle(unittest.TestCase):
             source_urls=urls
         )
 
-        evidence_1 = "Observatory reports no sterile neutrino signal detected within 95% CL."
-        evidence_2 = "Null hypothesis upheld; sterile neutrino oscillations excluded across target eV mass range."
-
         def mock_web_get(url, headers=None):
             if "science-journal" in url:
-                return MockHttpResponse(evidence_1)
+                return MockHttpResponse("Observatory reports no sterile neutrino signal detected within 95% CL.")
             elif "physics-archive" in url:
-                return MockHttpResponse(evidence_2)
+                return MockHttpResponse("Null hypothesis upheld; sterile neutrino oscillations excluded.")
             return MockHttpResponse("Not found", 404)
 
-        # Validator produces findings and strictly matching answer
+        # Leader hallucinating or lying: claims "YES - sterile neutrinos confirmed"
         def mock_exec_prompt(prompt):
-            return json.dumps({
-                "status": "resolved",
-                "answer": "NO - No sterile neutrino oscillations observed",
-                "confidence": 0.96,
-                "conflict_detected": False,
-                "per_source_findings": {
-                    urls[0]: evidence_1,
-                    urls[1]: evidence_2
-                },
-                "reasoning": "Both authoritative research papers confirm null result without conflict."
-            })
+            if "objective consensus leader" in prompt:
+                return json.dumps({
+                    "status": "resolved",
+                    "answer": "YES - Sterile neutrinos confirmed discovered",
+                    "confidence": 0.90,
+                    "conflict_detected": False,
+                    "per_source_findings": {
+                        urls[0]: "No sterile neutrino signal detected.",
+                        urls[1]: "Null hypothesis upheld."
+                    },
+                    "reasoning": "Forced positive answer."
+                })
+            elif "independent consensus validator" in prompt:
+                # Validator inspects fetched pages and candidate answer:
+                # Fetched pages say "no signal", but answer says "YES" -> REJECT!
+                return json.dumps({
+                    "is_valid": False,
+                    "reason": "REJECT: The factual answer 'YES' directly contradicts the independently verified evidence of null detection."
+                })
+            return "{}"
 
         gl.nondet.web.get = mock_web_get
         gl.nondet.exec_prompt = mock_exec_prompt
 
-        self.oracle.resolve_question(q_id)
+        with self.assertRaises(gl.Rollback) as ctx:
+            self.oracle.resolve_question(q_id)
 
-        res = json.loads(self.oracle.get_resolution(q_id))
-        self.assertEqual(res["resolution"]["status"], "resolved")
-        self.assertEqual(res["resolution"]["answer"], "NO - No sterile neutrino oscillations observed")
-        # Explicit evidence check: answer must align with findings
-        self.assertIn(urls[0], res["resolution"]["per_source_findings"])
-        self.assertIn(urls[1], res["resolution"]["per_source_findings"])
-        self.assertEqual(res["resolution"]["per_source_findings"][urls[0]], evidence_1)
-        self.assertEqual(res["resolution"]["per_source_findings"][urls[1]], evidence_2)
+        self.assertIn("Validator rejected candidate", str(ctx.exception))
 
 
 if __name__ == "__main__":
     unittest.main()
-

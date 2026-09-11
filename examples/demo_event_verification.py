@@ -43,6 +43,24 @@ if "genlayer" not in sys.modules:
             @staticmethod
             def exec_prompt(prompt):
                 pass
+        class vm:
+            class Return:
+                def __init__(self, calldata):
+                    self.calldata = calldata
+            class UserError(Exception):
+                pass
+            class VMError(Exception):
+                pass
+
+            @staticmethod
+            def run_nondet_unsafe(leader_fn, validator_fn):
+                leader_val = leader_fn()
+                leader_res = _MockGl.vm.Return(leader_val)
+                is_valid = validator_fn(leader_res)
+                if not is_valid:
+                    raise _MockGl.Rollback("Validator rejected candidate: factual answer does not match independently verified evidence")
+                return leader_val
+
         class eq_principle:
             @staticmethod
             def prompt_non_comparative(*args, **kwargs):
@@ -106,6 +124,8 @@ def run_demo():
 
     # 2. Simulate validator consensus resolution
     print("\n[Step 2] Triggering decentralized consensus resolution...")
+    print("-> Phase A: Leader fetches web snapshots and synthesizes candidate resolution.")
+    print("-> Phase B: Validator independently fetches web snapshots and verifies evidence corroboration.")
     
     # Mocking independent web fetch responses for demonstration
     gl.nondet.web.get = lambda url, headers=None: type("Res", (), {
@@ -113,21 +133,31 @@ def run_demo():
         "status_code": 200
     })()
 
-    gl.nondet.exec_prompt = lambda p: json.dumps({
-        "status": "resolved",
-        "answer": "YES - Activated at epoch 269568",
-        "confidence": 0.98,
-        "conflict_detected": False,
-        "per_source_findings": {
-            sources[0]: "Official blog post confirms mainnet activation at epoch 269568.",
-            sources[1]: "Consensus release notes document activation parameters.",
-            sources[2]: "Etherscan beacon chain confirms block finalized at slot."
-        },
-        "reasoning": "Unanimous agreement across official developer communication, protocol releases, and explorer."
-    })
+    def mock_prompt_handler(prompt):
+        if "objective consensus leader" in prompt:
+            return json.dumps({
+                "status": "resolved",
+                "answer": "YES - Activated at epoch 269568",
+                "confidence": 0.98,
+                "conflict_detected": False,
+                "per_source_findings": {
+                    sources[0]: "Official blog post confirms mainnet activation at epoch 269568.",
+                    sources[1]: "Consensus release notes document activation parameters.",
+                    sources[2]: "Etherscan beacon chain confirms block finalized at slot."
+                },
+                "reasoning": "Unanimous agreement across official developer communication, protocol releases, and explorer."
+            })
+        elif "independent consensus validator" in prompt:
+            return json.dumps({
+                "is_valid": True,
+                "reason": "Independently verified: all fetched sources corroborate activation at epoch 269568 without conflict."
+            })
+        return "{}"
+
+    gl.nondet.exec_prompt = mock_prompt_handler
 
     oracle.resolve_question(question_id)
-    print("-> Resolution executed through GenLayer Equivalence Principle.")
+    print("-> Resolution verified and accepted through GenLayer Equivalence Principle (run_nondet_unsafe).")
 
     # 3. Read back verified oracle data
     print("\n[Step 3] Querying resolution payload via get_resolution()...")
@@ -140,7 +170,7 @@ def run_demo():
     print(f"Confidence:        {record['resolution']['confidence'] * 100:.1f}%")
     print(f"Conflict Detected: {record['resolution']['conflict_detected']}")
     print(f"Reasoning:         {record['resolution']['reasoning']}")
-    print("\nPer-Source Findings:")
+    print("\nPer-Source Findings (Independently Verified):")
     for url, finding in record['resolution']['per_source_findings'].items():
         print(f"  • {url}:\n    {finding}")
 
